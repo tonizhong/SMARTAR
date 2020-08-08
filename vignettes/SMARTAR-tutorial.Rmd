@@ -1,0 +1,83 @@
+---
+title: "SMARTAR-tutorial"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{SMARTAR-tutorial}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+SMARTAR package is for primary data analysis for sequential multiple assignment randomization trial (SMART) and are calibration tools for clinical trial planning purposes. This is a simple illustration of SMARTAR package. It only contains five main functions which are `seqmeans`, `atsmeans`, `smartest`, `smartsize` and `getncp`. In addition, it also contains one dataset `codiacs`.
+
+The use of these functions and dataset is:
+
+## load package and dataset
+
+```{r setup}
+library(SMARTAR)
+data(codiacs)
+```
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## seqmeans
+
+Exports treatment sequence, summarizes all the sequence-specific descriptive statistics and graphs, and provides design diagram of SMART.
+
+```{r}
+seqmeans(data=codiacs ,family="gaussian",plot="d", digits = 2,xlab = "SMART design")
+seqmeans(data=codiacs ,plot="s",color = "lightblue",xlab = "SEQ",family="gaussian")
+```
+
+## atsmeans
+
+Exports all the ATS embedded in SMART design and gives estimated strategy values and the variance-covariance matrix of estimated values.
+
+```{r}
+atsmeans(data=codiacs,conf=TRUE, alpha=0.05,plot=TRUE,digits = 2,pch=18,xlab="Treatment sequence")
+atsmeans(data=codiacs,conf=TRUE, alpha=0.05,digits = 2,pch=18,xlab="abc")
+```
+
+## smartest
+
+Exports results of statistical tests of comparing adaptive treatment strategies based on both global and pairwise tests.
+
+```{r}
+smartest(data=codiacs,method="IPW",adjust="Bon")
+```
+
+## getncp
+
+Return the value of non-centralized parameter for the chi-square distribution.
+
+```{r}
+getncp(df=5, alpha = 0.05, beta = 0.2, d = 1e-04, start = 5)
+```
+
+## smartsize
+
+Exports estimated strategy-specified means and their confidence interval, as well as the asymptotic variance-covariance matrix for these estimates.
+
+```{r}
+smartsize(delta=0.0435,df=5,global=TRUE,alpha=0.05,beta=0.20)
+
+SEQ <- 1:8
+A1 <- c(rep(0,4),rep(1,4))
+PI1 <- rep(0.5,8)
+O2 <- rep(c(0,0,1,1),2)
+P2 <- c(0.7,0.7,0.3,0.3,0.6,0.6,0.4,0.4)
+A2 <- rep(c(0,1),4)
+PI2 <- rep(0.5,8)
+MEAN <- 1:8
+SD <- rep(10,8)
+SIMatrix <- as.data.frame(cbind(SEQ,A1,PI1,O2,P2,A2,PI2,MEAN,SD))
+  
+smartsize(SIMatrix,global=TRUE,alpha=0.05,beta=0.20)
+```
+
+
