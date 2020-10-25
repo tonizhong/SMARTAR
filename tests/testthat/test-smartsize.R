@@ -1,7 +1,6 @@
 test_that("There is warning", {
   addTaskCallback(function(...) {set.seed(1);TRUE})
 # baseline=0
-
 ## stage=1
   SEQ <- 1:2
   A1 <- c(rep(0,1),rep(1,1))
