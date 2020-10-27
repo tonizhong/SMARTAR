@@ -1,0 +1,1035 @@
+---
+title: "strategy simulation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(SMARTAR)
+library(tidyverse)
+library(doParallel)
+```
+
+```{r,include=FALSE}
+simu_time_all=5
+core_num=4
+```
+
+## Design 1
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+#GENDATA(): CODIACS 2-2-2 design, continuous outcome
+GENDATA1=function(N,pi1=0.5,pi2=c(0.5,0.5,0.5,0.5),p,b,sigma=10){
+         P=Pi1=Pi2=A1=R=A2=Y=EY=SDY=group=rep(NA,N)
+         D=data.frame(P,Pi1,Pi2,A1,R,A2,Y,EY,SDY,group)                       #D is the SMART data
+  
+         N1=ceiling(N*pi1[1]); N0=N-N1
+         D$A1=c(rep(0,N0),rep(1,N1))                                          #A1
+  
+         D$P=c(rep(p[1],N0),rep(p[2],N1))
+         D$Pi1[which(D$A1==1)]=pi1[1]
+         D$Pi1[which(D$A1==0)]=1-pi1[1]
+         D$R=rbinom(n=N,size=1,prob=D$P)                                      #R~Bernoulli(P)
+  
+         N00=nrow(D[which(D$A1==0 & D$R==0),])                                #n of subjects give A1 and R
+         N01=nrow(D[which(D$A1==0 & D$R==1),])
+         N10=nrow(D[which(D$A1==1 & D$R==0),])
+         N11=nrow(D[which(D$A1==1 & D$R==1),])
+  
+         N001=ceiling(N00*pi2[1]);N000=N00-N001
+         N011=ceiling(N01*pi2[2]);N010=N01-N011 
+         N101=ceiling(N10*pi2[3]);N100=N10-N101
+         N111=ceiling(N11*pi2[4]);N110=N11-N111
+  
+         D$A2[which(D$A1==0 & D$R==0)]=sample(c(rep(0,N000),rep(1,N001)),size=N00,replace=F)  #A2|A1=0,R=0
+         D$A2[which(D$A1==0 & D$R==1)]=sample(c(rep(0,N010),rep(1,N011)),size=N01,replace=F)  #A2|A1=0,R=1
+         D$A2[which(D$A1==1 & D$R==0)]=sample(c(rep(0,N100),rep(1,N101)),size=N10,replace=F)  #A2|A1=1,R=0
+         D$A2[which(D$A1==1 & D$R==1)]=sample(c(rep(0,N110),rep(1,N111)),size=N11,replace=F)  #A2|A1=1,R=1
+  
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==0)]=1-pi2[1] #label the sequence
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==1)]=pi2[1]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==0)]=1-pi2[2]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==1)]=pi2[2]
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==0)]=1-pi2[3] #label the sequence
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==1)]=pi2[3]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==0)]=1-pi2[4]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==1)]=pi2[4]
+  
+         D$group[which(D$A1==0 & D$R==0 & D$A2==0)]=1 #label the sequence
+         D$group[which(D$A1==0 & D$R==0 & D$A2==1)]=2
+         D$group[which(D$A1==0 & D$R==1 & D$A2==0)]=3
+         D$group[which(D$A1==0 & D$R==1 & D$A2==1)]=4
+  
+         D$group[which(D$A1==1 & D$R==0 & D$A2==0)]=5
+         D$group[which(D$A1==1 & D$R==0 & D$A2==1)]=6
+         D$group[which(D$A1==1 & D$R==1 & D$A2==0)]=7
+         D$group[which(D$A1==1 & D$R==1 & D$A2==1)]=8
+  
+         D$W=1/(D$Pi1*D$Pi2)
+  
+         bmat=matrix(b,nrow=1)
+         Xmat=matrix(c(rep(1,N),D$A1,D$R,D$A2,D$A1*D$R,D$A1*D$A2,D$R*D$A2,D$A1*D$R*D$A2),nrow=N)
+         D$EY=Xmat%*%t(bmat)
+         D$SDY=rep(sigma,N)                                           #within-sequence sigma
+         D$Y=rnorm(N,mean=D$EY,sd=D$SDY)                              #observed outcome
+  
+         return(D)
+}
+
+#True policy values
+TMU=function(datain,d1,d20,d21){
+    D=datain[which(datain$A1==d1),]  
+    tp=mean(D$P[which(D$A1==d1)])                           #true P(R=1|A1=d1)
+    tmu0=mean(D$EY[which(D$R==0 & D$A2==d20)])              #true sequence mean R=0
+    tmu1=mean(D$EY[which(D$R==1 & D$A2==d21)])              #true sequence mean R=1
+    mu=(1-tp)*tmu0+tp*tmu1
+    return(mu)
+}
+
+
+#vector of all the true policy values
+TUMAT=function(datain){
+      D=datain
+      mu1=TMU(datain=D,d1=0,d20=0,d21=0)
+      mu2=TMU(datain=D,d1=0,d20=0,d21=1)
+      mu3=TMU(datain=D,d1=0,d20=1,d21=0)
+      mu4=TMU(datain=D,d1=0,d20=1,d21=1)
+      mu5=TMU(datain=D,d1=1,d20=0,d21=0)
+      mu6=TMU(datain=D,d1=1,d20=0,d21=1)
+      mu7=TMU(datain=D,d1=1,d20=1,d21=0)
+      mu8=TMU(datain=D,d1=1,d20=1,d21=1)
+      umat=matrix(c(mu1,mu2,mu3,mu4,mu5,mu6,mu7,mu8),nrow=8,byrow=T)
+      return(umat)
+}
+
+gene_2_0_0=function(data){
+  data_1=data[,c(5,6,7,8)]
+  colnames(data_1)=c("A1","O2","A2","Y")
+  return(data_1)
+}
+
+get_smartar=function(beta,simu_time=5000,N=200){
+  result_data=data.frame(matrix(NA,nrow = simu_time,ncol=nrow(beta)))
+  result=rep(NA,nrow(beta))
+  for (i in 1:nrow(beta)) {
+    for (j in 1:simu_time) {
+      CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta[i,]))
+      Dat_2_0_0=gene_2_0_0(CD)
+      a= smartest(data=Dat_2_0_0,common=TRUE)
+      result_data[j,i]=a$Global.test$Pvalue
+    }
+    result[i]=length(result_data[,i][which(result_data[,i]<=0.05)])/length(result_data[,i])
+  }
+  return(result)
+}
+
+get_plot=function(data,id,real_value,cex=0.5,scenario){
+   data=as.data.frame(data)
+    main_spe=paste("Simulation for",scenario,sep = " ")
+    ylab_spe="Strategy value"
+  plot(x=data$simulate_time,y=data[,id],type="l",ylim = c(-30,50),lwd=0.5,ylab="",xlab="",axes = FALSE,frame=TRUE)
+  title(main_spe,cex.main=cex,line = 1)
+abline(h=real_value[id],col="red",lty=2)
+title(xlab="Simulation replicates",cex.lab=cex,line=0.7)
+title(ylab=ylab_spe,cex.lab=cex,line=1)
+legend("topright", 
+  legend = c("calculated value", "true value"), 
+  col = c("black", "red"), 
+  pch = c(16,NA), 
+  bty = "n", 
+  pt.cex = 0.5, 
+  cex = cex, 
+  text.col = "black", 
+  horiz = F , 
+  lty=c(NA,2))
+axis(1, c(1,simu_time_all), tck=-0.02,cex.axis=cex,padj=-3.5)
+axis(2,c(-20,real_value[id],40),tck=-0.02,cex.axis=cex,padj=2.5)
+}
+
+##get_scenario=function(beta,simu_time=5000,N=200,scenario){##outcome_2_0_0)
+##  out_2_0_0=data.frame(matrix(NA,nrow = simu_time,ncol=8))
+##  for (i in 1:simu_time) {
+##  CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta))
+##  Dat_2_0_0=gene_2_0_0(CD)
+##  data_2_0_0_ats=SMARTAR::atsmeans(Dat_2_0_0)
+##  data_2_0_0_ats=data_2_0_0_ats$value
+##  out_2_0_0[,1][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,2][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0& ##  data_2_0_0_ats$d01== 1),]$value
+##  out_2_0_0[,3][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,4][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1& ##  data_2_0_0_ats$d01== 1),]$value
+##  out_2_0_0[,5][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,6][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0& ##  data_2_0_0_ats$d01== 1),]$value
+##  out_2_0_0[,7][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,8][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1& ##  data_2_0_0_ats$d01== 1),]$value
+##}
+##outcome_2_0_0=cbind(out_2_0_0[,1:8],simulate_time=seq(from=1,to=simu_time,by=((simu_t##ime-1)/(simu_time-1)))) %>% as.data.frame()
+##write_csv(outcome_2_0_0,paste(scenario,"csv",sep = "."))
+##}
+
+get_scenario_plot=function(outcome_2_0_0,beta,scenario,N=200){
+CD=GENDATA1(N=N,p=c(1/3,1/3),b=as.numeric(beta))
+real_2_0_0=round(TUMAT(datain=CD),2)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=1,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=2,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=3,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=4,real_value=real_2_0_0,scenario= scenario)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=5,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=6,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=7,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=8,real_value=real_2_0_0,scenario= scenario)
+}
+
+beta=as.data.frame(rbind(c(0,0,0,0,0,0,0,0),c(0,4.48,0,0,0,0,0,0),c(0,3.63,0,2.62,0,0,0,0),c(0,1.86,0,3.73,-9.32,1.86,-0.93,0),c(0,6.33,0,0,0,0,0,0),c(0,5.13,0,3.70,0,0,0,0),c(0,2.64,0,5.28,-13.20,2.64,-1.32,0)))
+scenarios=c("scenario_0","scenario_1","scenario_2","scenario_3","scenario_4","scenario_5","scenario_6")
+
+## for known dataset
+##outcome=list(NULL)
+##for (i in 1:7) {
+##  data_name=paste(paste("scenario",i-1,sep="_"),"csv",sep=".")
+##  outcome[[i]]=read_csv(data_name)
+##}
+```
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+##cl <- makeCluster(8)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = "tidyverse") %dopar% get_scenario(beta = beta[i,],simu_time = 5000,scenario = ##scenarios_2[i])
+##
+##stopCluster(cl)
+```
+
+```{r,dpi=300,message=FALSE,warning=FALSE,echo=FALSE,fig.show="hold",out.width='60%'}
+## for known dataset
+outcome=list(NULL)
+for (i in 1:7) {
+  data_name=paste(paste(paste("scenario",i-1,sep="_"),2,sep="_"),"csv",sep = ".")
+  outcome[[i]]=read_csv(data_name)
+}
+
+design_name=c("design_1_0","design_1_1","design_1_2","design_1_3","design_1_4","design_1_5","design_1_6")
+## generate plot
+for (i in 1:7) {
+  data=outcome[[i]]
+  get_scenario_plot(data,beta=beta[i,],scenario = design_name[i])
+}
+```
+
+```{r,include=FALSE}
+## get p-value and power for smartest
+##cl <- makeCluster(8)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = c("tidyverse","SMARTAR") )%dopar% get_smartar(beta = beta[i,],simu_time = 5000)
+##stopCluster(cl)
+```
+
+## design 2
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+#GENDATAPTW(): generate data for Design 2, continuous outcome
+GENDATA2=function(N=200,pi1=0.5,p=c(1/3,1/3),pi2=c(0.5,0.5),b=c(0,0,0,0,0,0,0,0),sigma=10){
+         P=W=Pi1=Pi2=A1=R=A2=EY=Y=SDY=group=rep(NA,N)
+         D=data.frame(P,W,Pi1,Pi2,A1,R,A2,Y,EY,SDY,group)                       #D is the SMART data
+  
+         N1=ceiling(N*pi1[1]); N0=N-N1
+         D$A1=c(rep(0,N0),rep(1,N1))                                          #A1 
+  
+         D$P=c(rep(p[1],N0),rep(p[2],N1))
+         D$Pi1[which(D$A1==1)]=pi1[1]
+         D$Pi1[which(D$A1==0)]=1-pi1[1]
+         D$R=rbinom(n=N,size=1,prob=D$P)     
+  
+         N00=nrow(D[which(D$A1==0 & D$R==0),])                                #n of subjects give A1 and R
+         N01=nrow(D[which(D$A1==0 & D$R==1),]) 
+         N10=nrow(D[which(D$A1==1 & D$R==0),]) 
+         N11=nrow(D[which(D$A1==1 & D$R==1),]) 
+  
+         N001=ceiling(N00*pi2[1]); N000=N00-N001
+         N010=N01
+  
+         N101=ceiling(N10*pi2[2]); N100=N10-N101
+         N110=N11
+  
+         D$A2[which(D$A1==0 & D$R==0)]=sample(c(rep(0,N000),rep(1,N001)),size=N00,replace=F)  #A2|A1=1,R=0
+         D$A2[which(D$A1==0 & D$R==1)]=rep(0,N010)                                            #A2|A1=1,R=1
+         D$A2[which(D$A1==1 & D$R==0)]=sample(c(rep(0,N100),rep(1,N101)),size=N10,replace=F)  #A2|A1=2,R=0
+         D$A2[which(D$A1==1 & D$R==1)]=rep(0,N110)                                            #A2|A1=2,R=1                                           
+  
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==0)]=1-pi2[1] #label the sequence
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==1)]=pi2[1]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==0)]=1
+  
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==0)]=1-pi2[2] #label the sequence  
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==1)]=pi2[2]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==0)]=1
+  
+         D$group[which(D$A1==0 & D$R==0 & D$A2==0)]=1                     #label the sequence
+         D$group[which(D$A1==0 & D$R==0 & D$A2==1)]=2
+         D$group[which(D$A1==0 & D$R==1 & D$A2==0)]=3        
+         D$group[which(D$A1==1 & D$R==0 & D$A2==0)]=4
+         D$group[which(D$A1==1 & D$R==0 & D$A2==1)]=5
+         D$group[which(D$A1==1 & D$R==1 & D$A2==0)]=6
+  
+         D$W=1/(D$Pi1*D$Pi2)
+  
+         bmat=matrix(b,nrow=1)
+         Xmat=matrix(c(rep(1,N),D$A1,D$R,D$A2,D$A1*D$R,D$A1*D$A2,D$R*D$A2,D$A1*D$R*D$A2),nrow=N)
+         D$EY=Xmat%*%t(bmat)        
+         D$SDY=rep(sigma,N)                                           #within-sequence sigma
+         D$Y=rnorm(N,mean=D$EY,sd=D$SDY)                              #observed outcome
+         return(D)
+}
+
+#calculate the true strategy values
+TMU=function(datain,d1,d20,d21){
+    D=datain[which(datain$A1==d1),]  
+    tp=mean(D$P[which(D$A1==d1)])                           #true P(R=1|A1=d1)
+    tmu0=mean(D$EY[which(D$R==0 & D$A2==d20)])              #true sequence mean R=0
+    tmu1=mean(D$EY[which(D$R==1 & D$A2==d21)])              #true sequence mean R=1
+    mu=(1-tp)*tmu0+tp*tmu1
+    return(mu)
+}
+
+gene_2_0_0=function(data){
+  data_1=data[,c(5,6,7,8)]
+  colnames(data_1)=c("A1","O2","A2","Y")
+  return(data_1)
+}
+
+#calcualte all the strategy value under a SMART (design 2)
+TUMAT=function(datain){
+      D=datain
+      mu1=TMU(datain=D,d1=0,d20=0,d21=0)
+      mu3=TMU(datain=D,d1=0,d20=1,d21=0)
+      mu5=TMU(datain=D,d1=1,d20=0,d21=0)
+      mu7=TMU(datain=D,d1=1,d20=1,d21=0)
+      umat=matrix(c(mu1,mu3,mu5,mu7),nrow=4,byrow=T)
+      return(umat)
+}
+
+
+get_smartar=function(beta,simu_time=5000,N=200){
+  result_data=data.frame(matrix(NA,nrow = simu_time,ncol=nrow(beta)))
+  result=rep(NA,nrow(beta))
+  for (i in 1:nrow(beta)) {
+    for (j in 1:simu_time) {
+      CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta[i,]))
+      Dat_2_0_0=gene_2_0_0(CD)
+      a= smartest(data=Dat_2_0_0,common=TRUE)
+      result_data[j,i]=a$Global.test$Pvalue
+    }
+    result[i]=length(result_data[,i][which(result_data[,i]<=0.05)])/length(result_data[,i])
+  }
+  return(result)
+}
+
+get_scenario_plot=function(beta,simu_time=5000,N=200,scenario,outcome_2_0_0){
+##  out_2_0_0=data.frame(matrix(NA,nrow = simu_time,ncol=4))
+##  for (i in 1:simu_time) {
+##  CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta))
+##  Dat_2_0_0=gene_2_0_0(CD)
+##  data_2_0_0_ats=atsmeans(Dat_2_0_0)
+##  data_2_0_0_ats=data_2_0_0_ats$value
+##  out_2_0_0[,1][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,2][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,3][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0& ##  data_2_0_0_ats$d01== 0),]$value
+##  out_2_0_0[,4][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1& ##  data_2_0_0_ats$d01== 0),]$value
+##}
+##outcome_2_0_0=cbind(out_2_0_0[,1:4],simulate_time=seq(from=1,to=simu_time,by=((simu_t##ime-1)/(simu_time-1)))) %>% as.data.frame()
+##write_csv(outcome_2_0_0,paste(scenario,"csv",sep = "."))
+CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta))
+real_2_0_0=round(TUMAT(datain=CD),2)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=1,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=2,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=3,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=4,real_value=real_2_0_0,scenario= scenario)
+}
+
+beta=as.data.frame(rbind(c(0,0,0,0,0,0,0,0),c(0,4.48,0,0,0,0,0,0),c(0,0,0,2.88,12,0,0,0), c(0,-1.21,0,4.82,4.82,1.21,0,0),c(0,6.33,0,0,0,0,0,0),c(0,0,0,4.13,17.70,0,0,0),
+c(0,-1.72,0,6.87,6.87,1.72,0,0)))
+scenarios=c("scenario_0","scenario_1","scenario_2","scenario_3","scenario_4","scenario_5","scenario_6")
+
+outcome=list(NULL)
+for (i in 1:7) {
+  data_name=paste(paste("scenario",i-1,sep="_"),"csv",sep=".")
+  outcome[[i]]=read_csv(data_name)
+}
+```
+
+```{r,dpi=300,message=FALSE,warning=FALSE,echo=FALSE,fig.show="hold",out.width='60%'}
+design_name=c("design_2_0","design_2_1","design_2_2","design_2_3","design_2_4","design_2_5","design_2_6")
+for (i in 1:7) {
+  get_scenario_plot(beta[i,],simu_time = 5000,scenario = design_name[i],outcome_2_0_0 = as.data.frame(outcome[[i]]))
+}
+```
+
+## Randomized play the winner design 1
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+#GENDATA(): CODIACS 2-2-2 design, continuous outcome
+GENDATA2=function(N,pi1=0.5,pi2,p,b,sigma=10){
+         P=Pi1=Pi2=A1=R=A2=Y=EY=SDY=group=rep(NA,N)
+         D=data.frame(P,Pi1,Pi2,A1,R,A2,Y,EY,SDY,group)                       #D is the SMART data
+  
+         N1=ceiling(N*pi1[1]); N0=N-N1
+         D$A1=c(rep(0,N0),rep(1,N1))                                          #A1
+  
+         D$P=c(rep(p[1],N0),rep(p[2],N1))
+         D$Pi1[which(D$A1==1)]=pi1[1]
+         D$Pi1[which(D$A1==0)]=1-pi1[1]
+         D$R=rbinom(n=N,size=1,prob=D$P)                                      #R~Bernoulli(P)
+  
+         N00=nrow(D[which(D$A1==0 & D$R==0),])                                #n of subjects give A1 and R
+         N01=nrow(D[which(D$A1==0 & D$R==1),])
+         N10=nrow(D[which(D$A1==1 & D$R==0),])
+         N11=nrow(D[which(D$A1==1 & D$R==1),])
+  
+         N001=ceiling(N00*pi2[1]);N000=N00-N001
+         N011=ceiling(N01*pi2[2]);N010=N01-N011 
+         N101=ceiling(N10*pi2[3]);N100=N10-N101
+         N111=ceiling(N11*pi2[4]);N110=N11-N111
+  
+         D$A2[which(D$A1==0 & D$R==0)]=sample(c(rep(0,N000),rep(1,N001)),size=N00,replace=F)  #A2|A1=0,R=0
+         D$A2[which(D$A1==0 & D$R==1)]=sample(c(rep(0,N010),rep(1,N011)),size=N01,replace=F)  #A2|A1=0,R=1
+         D$A2[which(D$A1==1 & D$R==0)]=sample(c(rep(0,N100),rep(1,N101)),size=N10,replace=F)  #A2|A1=1,R=0
+         D$A2[which(D$A1==1 & D$R==1)]=sample(c(rep(0,N110),rep(1,N111)),size=N11,replace=F)  #A2|A1=1,R=1
+  
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==0)]=1-pi2[1] #label the sequence
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==1)]=pi2[1]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==0)]=1-pi2[2]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==1)]=pi2[2]
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==0)]=1-pi2[3] #label the sequence
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==1)]=pi2[3]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==0)]=1-pi2[4]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==1)]=pi2[4]
+  
+         D$group[which(D$A1==0 & D$R==0 & D$A2==0)]=1 #label the sequence
+         D$group[which(D$A1==0 & D$R==0 & D$A2==1)]=2
+         D$group[which(D$A1==0 & D$R==1 & D$A2==0)]=3
+         D$group[which(D$A1==0 & D$R==1 & D$A2==1)]=4
+  
+         D$group[which(D$A1==1 & D$R==0 & D$A2==0)]=5
+         D$group[which(D$A1==1 & D$R==0 & D$A2==1)]=6
+         D$group[which(D$A1==1 & D$R==1 & D$A2==0)]=7
+         D$group[which(D$A1==1 & D$R==1 & D$A2==1)]=8
+  
+         D$W=1/(D$Pi1*D$Pi2)
+  
+         bmat=matrix(b,nrow=1)
+         Xmat=matrix(c(rep(1,N),D$A1,D$R,D$A2,D$A1*D$R,D$A1*D$A2,D$R*D$A2,D$A1*D$R*D$A2),nrow=N)
+         D$EY=Xmat%*%t(bmat)
+         D$SDY=rep(sigma,N)                                           #within-sequence sigma
+         D$Y=rnorm(N,mean=D$EY,sd=D$SDY)                              #observed outcome
+  
+         return(D)
+}
+#True policy values
+TMU=function(datain,d1,d20,d21){
+    D=datain[which(datain$A1==d1),]  
+    tp=mean(D$P[which(D$A1==d1)])                           #true P(R=1|A1=d1)
+    tmu0=mean(D$EY[which(D$R==0 & D$A2==d20)])              #true sequence mean R=0
+    tmu1=mean(D$EY[which(D$R==1 & D$A2==d21)])              #true sequence mean R=1
+    mu=(1-tp)*tmu0+tp*tmu1
+    return(mu)
+}
+
+
+#vector of all the true policy values
+TUMAT=function(datain){
+      D=datain
+      mu1=TMU(datain=D,d1=0,d20=0,d21=0)
+      mu2=TMU(datain=D,d1=0,d20=0,d21=1)
+      mu3=TMU(datain=D,d1=0,d20=1,d21=0)
+      mu4=TMU(datain=D,d1=0,d20=1,d21=1)
+      mu5=TMU(datain=D,d1=1,d20=0,d21=0)
+      mu6=TMU(datain=D,d1=1,d20=0,d21=1)
+      mu7=TMU(datain=D,d1=1,d20=1,d21=0)
+      mu8=TMU(datain=D,d1=1,d20=1,d21=1)
+      umat=matrix(c(mu1,mu2,mu3,mu4,mu5,mu6,mu7,mu8),nrow=8,byrow=T)
+      return(umat)
+}
+
+gene_2_0_0=function(data){
+  data_1=data[,c(4,5,6,7)]
+  colnames(data_1)=c("A1","O2","A2","Y")
+  return(data_1)
+}
+
+get_smartar=function(beta,simu_time=5000,N=200,pi2){
+  result_data=data.frame(matrix(NA,nrow = simu_time,ncol=nrow(beta)))
+  result=rep(NA,nrow(beta))
+  for (i in 1:nrow(beta)) {
+    for (j in 1:simu_time) {
+      CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta[i,]),pi2=pi2)
+      Dat_2_0_0=gene_2_0_0(CD)
+      a= smartest(data=Dat_2_0_0,common=TRUE)
+      result_data[j,i]=a$Global.test$Pvalue
+    }
+    result[i]=length(result_data[,i][which(result_data[,i]<=0.05)])/length(result_data[,i])
+  }
+  return(result)
+}
+
+get_scenario=function(beta,simu_time=5000,N=200,scenario,pi2){##outcome_2_0_0)
+  out_2_0_0=data.frame(matrix(NA,nrow = simu_time,ncol=8))
+  for (i in 1:simu_time) {
+  CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+  Dat_2_0_0=gene_2_0_0(CD)
+  data_2_0_0_ats=SMARTAR::atsmeans(Dat_2_0_0)
+  data_2_0_0_ats=data_2_0_0_ats$value
+  out_2_0_0[,1][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,2][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 1),]$value
+  out_2_0_0[,3][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,4][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 1),]$value
+  out_2_0_0[,5][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,6][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 1),]$value
+  out_2_0_0[,7][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,8][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 1),]$value
+}
+outcome_2_0_0=cbind(out_2_0_0[,1:8],simulate_time=seq(from=1,to=simu_time,by=((simu_time-1)/(simu_time-1)))) %>% as.data.frame()
+write_csv(outcome_2_0_0,paste(scenario,"csv",sep = "."))
+}
+
+get_scenario_plot=function(outcome_2_0_0,beta,scenario,N=200,pi2){
+CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+real_2_0_0=round(TUMAT(datain=CD),2)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=1,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=2,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=3,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=4,real_value=real_2_0_0,scenario= scenario)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=5,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=6,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=7,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=8,real_value=real_2_0_0,scenario= scenario)
+}
+
+beta=as.data.frame(rbind(c(0,0,0,0,0,0,0,0),c(0,4.48,0,0,0,0,0,0),c(0,3.63,0,2.62,0,0,0,0),c(0,1.86,0,3.73,-9.32,1.86,-0.93,0),c(0,6.33,0,0,0,0,0,0),c(0,5.13,0,3.70,0,0,0,0),c(0,2.64,0,5.28,-13.20,2.64,-1.32,0)))
+scenarios=c("randomized_play_the_winner_1_0","randomized_play_the_winner_1_1","randomized_play_the_winner_1_2","randomized_play_the_winner_1_3","randomized_play_the_winner_1_4","randomized_play_the_winner_1_5","randomized_play_the_winner_1_6")
+pi2=c(0.7,0.3,0.3,0.7)
+```
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = "tidyverse") %dopar% get_scenario(beta = beta[i,],simu_time ##= simu_time_all,scenario = scenarios[i],pi2=pi2)
+##stopCluster(cl)
+```
+
+```{r,dpi=300,message=FALSE,warning=FALSE,echo=FALSE,fig.show="hold",out.width='60%'}
+outcome=list(NULL)
+for (i in 1:7) {
+  data_name=paste(scenarios[i],"csv",sep = ".")
+  outcome[[i]]=read_csv(data_name)
+}
+
+for (i in 1:7) {
+  data=outcome[[i]]
+  get_scenario_plot(data,beta=beta[i,],scenario = scenarios[i],pi2 = pi2)
+}
+```
+
+```{r}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = c("tidyverse","SMARTAR") )%dopar% get_smartar(beta = ##beta[i,],simu_time = simu_time_all,pi2 = pi2)
+##stopCluster(cl)
+```
+
+## unbalanced randomization design 1
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+#GENDATA(): CODIACS 2-2-2 design, continuous outcome
+GENDATA2=function(N,pi1=0.7,pi2,p,b,sigma=10){
+         P=Pi1=Pi2=A1=R=A2=Y=EY=SDY=group=rep(NA,N)
+         D=data.frame(P,Pi1,Pi2,A1,R,A2,Y,EY,SDY,group)                       #D is the SMART data
+  
+         N1=ceiling(N*pi1[1]); N0=N-N1
+         D$A1=c(rep(0,N0),rep(1,N1))                                          #A1
+  
+         D$P=c(rep(p[1],N0),rep(p[2],N1))
+         D$Pi1[which(D$A1==1)]=pi1[1]
+         D$Pi1[which(D$A1==0)]=1-pi1[1]
+         D$R=rbinom(n=N,size=1,prob=D$P)                                      #R~Bernoulli(P)
+  
+         N00=nrow(D[which(D$A1==0 & D$R==0),])                                #n of subjects give A1 and R
+         N01=nrow(D[which(D$A1==0 & D$R==1),])
+         N10=nrow(D[which(D$A1==1 & D$R==0),])
+         N11=nrow(D[which(D$A1==1 & D$R==1),])
+  
+         N001=ceiling(N00*pi2[1]);N000=N00-N001
+         N011=ceiling(N01*pi2[2]);N010=N01-N011 
+         N101=ceiling(N10*pi2[3]);N100=N10-N101
+         N111=ceiling(N11*pi2[4]);N110=N11-N111
+  
+         D$A2[which(D$A1==0 & D$R==0)]=sample(c(rep(0,N000),rep(1,N001)),size=N00,replace=F)  #A2|A1=0,R=0
+         D$A2[which(D$A1==0 & D$R==1)]=sample(c(rep(0,N010),rep(1,N011)),size=N01,replace=F)  #A2|A1=0,R=1
+         D$A2[which(D$A1==1 & D$R==0)]=sample(c(rep(0,N100),rep(1,N101)),size=N10,replace=F)  #A2|A1=1,R=0
+         D$A2[which(D$A1==1 & D$R==1)]=sample(c(rep(0,N110),rep(1,N111)),size=N11,replace=F)  #A2|A1=1,R=1
+  
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==0)]=1-pi2[1] #label the sequence
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==1)]=pi2[1]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==0)]=1-pi2[2]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==1)]=pi2[2]
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==0)]=1-pi2[3] #label the sequence
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==1)]=pi2[3]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==0)]=1-pi2[4]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==1)]=pi2[4]
+  
+         D$group[which(D$A1==0 & D$R==0 & D$A2==0)]=1 #label the sequence
+         D$group[which(D$A1==0 & D$R==0 & D$A2==1)]=2
+         D$group[which(D$A1==0 & D$R==1 & D$A2==0)]=3
+         D$group[which(D$A1==0 & D$R==1 & D$A2==1)]=4
+  
+         D$group[which(D$A1==1 & D$R==0 & D$A2==0)]=5
+         D$group[which(D$A1==1 & D$R==0 & D$A2==1)]=6
+         D$group[which(D$A1==1 & D$R==1 & D$A2==0)]=7
+         D$group[which(D$A1==1 & D$R==1 & D$A2==1)]=8
+  
+         D$W=1/(D$Pi1*D$Pi2)
+  
+         bmat=matrix(b,nrow=1)
+         Xmat=matrix(c(rep(1,N),D$A1,D$R,D$A2,D$A1*D$R,D$A1*D$A2,D$R*D$A2,D$A1*D$R*D$A2),nrow=N)
+         D$EY=Xmat%*%t(bmat)
+         D$SDY=rep(sigma,N)                                           #within-sequence sigma
+         D$Y=rnorm(N,mean=D$EY,sd=D$SDY)                              #observed outcome
+  
+         return(D)
+}
+
+#True policy values
+TMU=function(datain,d1,d20,d21){
+    D=datain[which(datain$A1==d1),]  
+    tp=mean(D$P[which(D$A1==d1)])                           #true P(R=1|A1=d1)
+    tmu0=mean(D$EY[which(D$R==0 & D$A2==d20)])              #true sequence mean R=0
+    tmu1=mean(D$EY[which(D$R==1 & D$A2==d21)])              #true sequence mean R=1
+    mu=(1-tp)*tmu0+tp*tmu1
+    return(mu)
+}
+
+
+#vector of all the true policy values
+TUMAT=function(datain){
+      D=datain
+      mu1=TMU(datain=D,d1=0,d20=0,d21=0)
+      mu2=TMU(datain=D,d1=0,d20=0,d21=1)
+      mu3=TMU(datain=D,d1=0,d20=1,d21=0)
+      mu4=TMU(datain=D,d1=0,d20=1,d21=1)
+      mu5=TMU(datain=D,d1=1,d20=0,d21=0)
+      mu6=TMU(datain=D,d1=1,d20=0,d21=1)
+      mu7=TMU(datain=D,d1=1,d20=1,d21=0)
+      mu8=TMU(datain=D,d1=1,d20=1,d21=1)
+      umat=matrix(c(mu1,mu2,mu3,mu4,mu5,mu6,mu7,mu8),nrow=8,byrow=T)
+      return(umat)
+}
+
+
+
+gene_2_0_0=function(data){
+  data_1=data[,c(4,5,6,7)]
+  colnames(data_1)=c("A1","O2","A2","Y")
+  return(data_1)
+}
+
+get_smartar=function(beta,simu_time=5000,N=200,pi2){
+  result_data=data.frame(matrix(NA,nrow = simu_time,ncol=nrow(beta)))
+  result=rep(NA,nrow(beta))
+  for (i in 1:nrow(beta)) {
+    for (j in 1:simu_time) {
+      CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta[i,]),pi2=pi2)
+      Dat_2_0_0=gene_2_0_0(CD)
+      a= smartest(data=Dat_2_0_0,common=TRUE)
+      result_data[j,i]=a$Global.test$Pvalue
+    }
+    result[i]=length(result_data[,i][which(result_data[,i]<=0.05)])/length(result_data[,i])
+  }
+  return(result)
+}
+
+get_scenario=function(beta,simu_time=5000,N=200,scenario,pi2){##outcome_2_0_0)
+  out_2_0_0=data.frame(matrix(NA,nrow = simu_time,ncol=8))
+  for (i in 1:simu_time) {
+  CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+  Dat_2_0_0=gene_2_0_0(CD)
+  data_2_0_0_ats=SMARTAR::atsmeans(Dat_2_0_0)
+  data_2_0_0_ats=data_2_0_0_ats$value
+  out_2_0_0[,1][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,2][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 1),]$value
+  out_2_0_0[,3][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,4][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 1),]$value
+  out_2_0_0[,5][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,6][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 1),]$value
+  out_2_0_0[,7][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,8][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 1),]$value
+}
+outcome_2_0_0=cbind(out_2_0_0[,1:8],simulate_time=seq(from=1,to=simu_time,by=((simu_time-1)/(simu_time-1)))) %>% as.data.frame()
+write_csv(outcome_2_0_0,paste(scenario,"csv",sep = "."))
+}
+
+get_scenario_plot=function(outcome_2_0_0,beta,scenario,N=200,pi2){
+CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+real_2_0_0=round(TUMAT(datain=CD),2)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=1,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=2,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=3,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=4,real_value=real_2_0_0,scenario= scenario)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=5,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=6,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=7,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=8,real_value=real_2_0_0,scenario= scenario)
+}
+
+beta=as.data.frame(rbind(c(0,0,0,0,0,0,0,0),c(0,4.48,0,0,0,0,0,0),c(0,3.63,0,2.62,0,0,0,0),c(0,1.86,0,3.73,-9.32,1.86,-0.93,0),c(0,6.33,0,0,0,0,0,0),c(0,5.13,0,3.70,0,0,0,0),c(0,2.64,0,5.28,-13.20,2.64,-1.32,0)))
+scenarios=c("unbalanced_randomize_1_0","unbalanced_randomize_1_1","unbalanced_randomize_1_2","unbalanced_randomize_1_3","unbalanced_randomize_1_4","unbalanced_randomize_1_5","unbalanced_randomize_1_6")
+pi2=c(0.3,0.7,0.3,0.7)
+
+```
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = "tidyverse") %dopar% get_scenario(beta = beta[i,],simu_time ##= simu_time_all,scenario = scenarios[i],pi2=pi2)
+##stopCluster(cl)
+
+```
+
+```{r,dpi=300,message=FALSE,warning=FALSE,echo=FALSE,fig.show="hold",out.width='60%'}
+## for known dataset
+outcome=list(NULL)
+for (i in 1:7) {
+  data_name=paste(scenarios[i],"csv",sep = ".")
+  outcome[[i]]=read_csv(data_name)
+}
+
+for (i in 1:7) {
+  data=outcome[[i]]
+  get_scenario_plot(data,beta=beta[i,],scenario = scenarios[i],pi2 = pi2)
+}
+```
+
+```{r}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = c("tidyverse","SMARTAR") )%dopar% get_smartar(beta = ##beta[i,],simu_time = simu_time_all,pi2 = pi2)
+##stopCluster(cl)
+```
+
+## Randomized play the winner design 2
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+GENDATA2=function(N=200,pi1=0.5,p=c(1/3,1/3),pi2=c(0.5,0.5),b=c(0,0,0,0,0,0,0,0),sigma=10){
+         P=W=Pi1=Pi2=A1=R=A2=EY=Y=SDY=group=rep(NA,N)
+         D=data.frame(P,W,Pi1,Pi2,A1,R,A2,Y,EY,SDY,group)                       #D is the SMART data
+  
+         N1=ceiling(N*pi1[1]); N0=N-N1
+         D$A1=c(rep(0,N0),rep(1,N1))                                          #A1 
+  
+         D$P=c(rep(p[1],N0),rep(p[2],N1))
+         D$Pi1[which(D$A1==1)]=pi1[1]
+         D$Pi1[which(D$A1==0)]=1-pi1[1]
+         D$R=rbinom(n=N,size=1,prob=D$P)     
+  
+         N00=nrow(D[which(D$A1==0 & D$R==0),])                                #n of subjects give A1 and R
+         N01=nrow(D[which(D$A1==0 & D$R==1),]) 
+         N10=nrow(D[which(D$A1==1 & D$R==0),]) 
+         N11=nrow(D[which(D$A1==1 & D$R==1),]) 
+  
+         N001=ceiling(N00*pi2[1]); N000=N00-N001
+         N010=N01
+  
+         N101=ceiling(N10*pi2[2]); N100=N10-N101
+         N110=N11
+  
+         D$A2[which(D$A1==0 & D$R==0)]=sample(c(rep(0,N000),rep(1,N001)),size=N00,replace=F)  #A2|A1=1,R=0
+         D$A2[which(D$A1==0 & D$R==1)]=rep(0,N010)                                            #A2|A1=1,R=1
+         D$A2[which(D$A1==1 & D$R==0)]=sample(c(rep(0,N100),rep(1,N101)),size=N10,replace=F)  #A2|A1=2,R=0
+         D$A2[which(D$A1==1 & D$R==1)]=rep(0,N110)                                            #A2|A1=2,R=1                                           
+  
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==0)]=1-pi2[1] #label the sequence
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==1)]=pi2[1]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==0)]=1
+  
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==0)]=1-pi2[2] #label the sequence  
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==1)]=pi2[2]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==0)]=1
+  
+         D$group[which(D$A1==0 & D$R==0 & D$A2==0)]=1                     #label the sequence
+         D$group[which(D$A1==0 & D$R==0 & D$A2==1)]=2
+         D$group[which(D$A1==0 & D$R==1 & D$A2==0)]=3        
+         D$group[which(D$A1==1 & D$R==0 & D$A2==0)]=4
+         D$group[which(D$A1==1 & D$R==0 & D$A2==1)]=5
+         D$group[which(D$A1==1 & D$R==1 & D$A2==0)]=6
+  
+         D$W=1/(D$Pi1*D$Pi2)
+  
+         bmat=matrix(b,nrow=1)
+         Xmat=matrix(c(rep(1,N),D$A1,D$R,D$A2,D$A1*D$R,D$A1*D$A2,D$R*D$A2,D$A1*D$R*D$A2),nrow=N)
+         D$EY=Xmat%*%t(bmat)        
+         D$SDY=rep(sigma,N)                                           #within-sequence sigma
+         D$Y=rnorm(N,mean=D$EY,sd=D$SDY)                              #observed outcome
+         return(D)
+}
+
+
+#calculate the true strategy values
+TMU=function(datain,d1,d20,d21){
+    D=datain[which(datain$A1==d1),]  
+    tp=mean(D$P[which(D$A1==d1)])                           #true P(R=1|A1=d1)
+    tmu0=mean(D$EY[which(D$R==0 & D$A2==d20)])              #true sequence mean R=0
+    tmu1=mean(D$EY[which(D$R==1 & D$A2==d21)])              #true sequence mean R=1
+    mu=(1-tp)*tmu0+tp*tmu1
+    return(mu)
+}
+
+
+#calcualte all the strategy value under a SMART (design 2)
+TUMAT=function(datain){
+      D=datain
+      mu1=TMU(datain=D,d1=0,d20=0,d21=0)
+      mu3=TMU(datain=D,d1=0,d20=1,d21=0)
+      mu5=TMU(datain=D,d1=1,d20=0,d21=0)
+      mu7=TMU(datain=D,d1=1,d20=1,d21=0)
+      umat=matrix(c(mu1,mu3,mu5,mu7),nrow=4,byrow=T)
+      return(umat)
+}
+
+gene_2_0_0=function(data){
+  data_1=data[,c(5,6,7,8)]
+  colnames(data_1)=c("A1","O2","A2","Y")
+  return(data_1)
+}
+
+get_smartar=function(beta,simu_time=5000,N=200,pi2){
+  result_data=data.frame(matrix(NA,nrow = simu_time,ncol=nrow(beta)))
+  result=rep(NA,nrow(beta))
+  for (i in 1:nrow(beta)) {
+    for (j in 1:simu_time) {
+      CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta[i,]),pi2=pi2)
+      Dat_2_0_0=gene_2_0_0(CD)
+      a= smartest(data=Dat_2_0_0,common=TRUE)
+      result_data[j,i]=a$Global.test$Pvalue
+    }
+    result[i]=length(result_data[,i][which(result_data[,i]<=0.05)])/length(result_data[,i])
+  }
+  return(result)
+}
+
+get_scenario=function(beta,simu_time=5000,N=200,scenario,pi2){##outcome_2_0_0)
+  out_2_0_0=data.frame(matrix(NA,nrow = simu_time,ncol=4))
+  for (i in 1:simu_time) {
+  CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+  Dat_2_0_0=gene_2_0_0(CD)
+  data_2_0_0_ats=SMARTAR::atsmeans(Dat_2_0_0)
+  data_2_0_0_ats=data_2_0_0_ats$value
+  out_2_0_0[,1][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,2][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,3][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,4][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+}
+outcome_2_0_0=cbind(out_2_0_0[,1:4],simulate_time=seq(from=1,to=simu_time,by=((simu_time-1)/(simu_time-1)))) %>% as.data.frame()
+write_csv(outcome_2_0_0,paste(scenario,"csv",sep = "."))
+}
+
+get_scenario_plot=function(outcome_2_0_0,beta,scenario,N=200,pi2){
+CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+real_2_0_0=round(TUMAT(datain=CD),2)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=1,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=2,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=3,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=4,real_value=real_2_0_0,scenario= scenario)
+}
+
+beta=as.data.frame(rbind(c(0,0,0,0,0,0,0,0),c(0,4.48,0,0,0,0,0,0),c(0,0,0,2.88,12,0,0,0),c(0,-1.21,0,4.82,4.82,1.21,0,0),c(0,6.33,0,0,0,0,0,0),c(0,0,0,4.13,17.70,0,0,0) ,c(0,-1.72,0,6.87,6.87,1.72,0,0)))
+scenarios=c("randomized_play_the_winner_2_0","randomized_play_the_winner_2_1","randomized_play_the_winner_2_2","randomized_play_the_winner_2_3","randomized_play_the_winner_2_4","randomized_play_the_winner_2_5","randomized_play_the_winner_2_6")
+pi2=c(0.7,0.3)
+```
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = "tidyverse") %dopar% get_scenario(beta = beta[i,],simu_time ##= simu_time_all,scenario = scenarios[i],pi2=pi2)
+##stopCluster(cl)
+```
+
+```{r,dpi=300,message=FALSE,warning=FALSE,echo=FALSE,fig.show="hold",out.width='60%'}
+## for known dataset
+outcome=list(NULL)
+for (i in 1:7) {
+  data_name=paste(scenarios[i],"csv",sep = ".")
+  outcome[[i]]=read_csv(data_name)
+}
+
+for (i in 1:7) {
+  data=outcome[[i]]
+  get_scenario_plot(data,beta=beta[i,],scenario = scenarios[i],pi2 = pi2)
+}
+```
+
+```{r}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = c("tidyverse","SMARTAR") )%dopar% get_smartar(beta = ##beta[i,],simu_time = simu_time_all,pi2 = pi2)
+##stopCluster(cl)
+```
+
+## Unbalanced randomization design 2
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+GENDATA2=function(N=200,pi1=0.7,p=c(1/3,1/3),pi2=c(0.5,0.5),b=c(0,0,0,0,0,0,0,0),sigma=10){
+         P=W=Pi1=Pi2=A1=R=A2=EY=Y=SDY=group=rep(NA,N)
+         D=data.frame(P,W,Pi1,Pi2,A1,R,A2,Y,EY,SDY,group)                       #D is the SMART data
+  
+         N1=ceiling(N*pi1[1]); N0=N-N1
+         D$A1=c(rep(0,N0),rep(1,N1))                                          #A1 
+  
+         D$P=c(rep(p[1],N0),rep(p[2],N1))
+         D$Pi1[which(D$A1==1)]=pi1[1]
+         D$Pi1[which(D$A1==0)]=1-pi1[1]
+         D$R=rbinom(n=N,size=1,prob=D$P)     
+  
+         N00=nrow(D[which(D$A1==0 & D$R==0),])                                #n of subjects give A1 and R
+         N01=nrow(D[which(D$A1==0 & D$R==1),]) 
+         N10=nrow(D[which(D$A1==1 & D$R==0),]) 
+         N11=nrow(D[which(D$A1==1 & D$R==1),]) 
+  
+         N001=ceiling(N00*pi2[1]); N000=N00-N001
+         N010=N01
+  
+         N101=ceiling(N10*pi2[2]); N100=N10-N101
+         N110=N11
+  
+         D$A2[which(D$A1==0 & D$R==0)]=sample(c(rep(0,N000),rep(1,N001)),size=N00,replace=F)  #A2|A1=1,R=0
+         D$A2[which(D$A1==0 & D$R==1)]=rep(0,N010)                                            #A2|A1=1,R=1
+         D$A2[which(D$A1==1 & D$R==0)]=sample(c(rep(0,N100),rep(1,N101)),size=N10,replace=F)  #A2|A1=2,R=0
+         D$A2[which(D$A1==1 & D$R==1)]=rep(0,N110)                                            #A2|A1=2,R=1                                           
+  
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==0)]=1-pi2[1] #label the sequence
+         D$Pi2[which(D$A1==0 & D$R==0 & D$A2==1)]=pi2[1]
+         D$Pi2[which(D$A1==0 & D$R==1 & D$A2==0)]=1
+  
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==0)]=1-pi2[2] #label the sequence  
+         D$Pi2[which(D$A1==1 & D$R==0 & D$A2==1)]=pi2[2]
+         D$Pi2[which(D$A1==1 & D$R==1 & D$A2==0)]=1
+  
+         D$group[which(D$A1==0 & D$R==0 & D$A2==0)]=1                     #label the sequence
+         D$group[which(D$A1==0 & D$R==0 & D$A2==1)]=2
+         D$group[which(D$A1==0 & D$R==1 & D$A2==0)]=3        
+         D$group[which(D$A1==1 & D$R==0 & D$A2==0)]=4
+         D$group[which(D$A1==1 & D$R==0 & D$A2==1)]=5
+         D$group[which(D$A1==1 & D$R==1 & D$A2==0)]=6
+  
+         D$W=1/(D$Pi1*D$Pi2)
+  
+         bmat=matrix(b,nrow=1)
+         Xmat=matrix(c(rep(1,N),D$A1,D$R,D$A2,D$A1*D$R,D$A1*D$A2,D$R*D$A2,D$A1*D$R*D$A2),nrow=N)
+         D$EY=Xmat%*%t(bmat)        
+         D$SDY=rep(sigma,N)                                           #within-sequence sigma
+         D$Y=rnorm(N,mean=D$EY,sd=D$SDY)                              #observed outcome
+         return(D)
+}
+
+#calculate the true strategy values
+TMU=function(datain,d1,d20,d21){
+    D=datain[which(datain$A1==d1),]  
+    tp=mean(D$P[which(D$A1==d1)])                           #true P(R=1|A1=d1)
+    tmu0=mean(D$EY[which(D$R==0 & D$A2==d20)])              #true sequence mean R=0
+    tmu1=mean(D$EY[which(D$R==1 & D$A2==d21)])              #true sequence mean R=1
+    mu=(1-tp)*tmu0+tp*tmu1
+    return(mu)
+}
+
+#calcualte all the strategy value under a SMART (design 2)
+TUMAT=function(datain){
+      D=datain
+      mu1=TMU(datain=D,d1=0,d20=0,d21=0)
+      mu3=TMU(datain=D,d1=0,d20=1,d21=0)
+      mu5=TMU(datain=D,d1=1,d20=0,d21=0)
+      mu7=TMU(datain=D,d1=1,d20=1,d21=0)
+      umat=matrix(c(mu1,mu3,mu5,mu7),nrow=4,byrow=T)
+      return(umat)
+}
+
+gene_2_0_0=function(data){
+  data_1=data[,c(5,6,7,8)]
+  colnames(data_1)=c("A1","O2","A2","Y")
+  return(data_1)
+}
+
+get_smartar=function(beta,simu_time=5000,N=200,pi2){
+  result_data=data.frame(matrix(NA,nrow = simu_time,ncol=nrow(beta)))
+  result=rep(NA,nrow(beta))
+  for (i in 1:nrow(beta)) {
+    for (j in 1:simu_time) {
+      CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta[i,]),pi2=pi2)
+      Dat_2_0_0=gene_2_0_0(CD)
+      a= smartest(data=Dat_2_0_0,common=TRUE)
+      result_data[j,i]=a$Global.test$Pvalue
+    }
+    result[i]=length(result_data[,i][which(result_data[,i]<=0.05)])/length(result_data[,i])
+  }
+  return(result)
+}
+
+get_scenario=function(beta,simu_time=5000,N=200,scenario,pi2){##outcome_2_0_0)
+  out_2_0_0=data.frame(matrix(NA,nrow = simu_time,ncol=4))
+  for (i in 1:simu_time) {
+  CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+  Dat_2_0_0=gene_2_0_0(CD)
+  data_2_0_0_ats=SMARTAR::atsmeans(Dat_2_0_0)
+  data_2_0_0_ats=data_2_0_0_ats$value
+  out_2_0_0[,1][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,2][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==0 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,3][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 0&   data_2_0_0_ats$d01== 0),]$value
+  out_2_0_0[,4][i]=data_2_0_0_ats[which(data_2_0_0_ats$d0==1 &data_2_0_0_ats$d00== 1&   data_2_0_0_ats$d01== 0),]$value
+}
+outcome_2_0_0=cbind(out_2_0_0[,1:4],simulate_time=seq(from=1,to=simu_time,by=((simu_time-1)/(simu_time-1)))) %>% as.data.frame()
+write_csv(outcome_2_0_0,paste(scenario,"csv",sep = "."))
+}
+
+
+get_scenario_plot=function(outcome_2_0_0,beta,scenario,N=200,pi2){
+CD=GENDATA2(N=N,p=c(1/3,1/3),b=as.numeric(beta),pi2 = pi2)
+real_2_0_0=round(TUMAT(datain=CD),2)
+par(mfrow = c(2, 2),mar=c(1,2,2,1))
+get_plot(outcome_2_0_0,id=1,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=2,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=3,real_value=real_2_0_0,scenario= scenario)
+get_plot(outcome_2_0_0,id=4,real_value=real_2_0_0,scenario= scenario)
+}
+
+beta=as.data.frame(rbind(c(0,0,0,0,0,0,0,0),c(0,4.48,0,0,0,0,0,0),c(0,0,0,2.88,12,0,0,0),c(0,-1.21,0,4.82,4.82,1.21,0,0),c(0,6.33,0,0,0,0,0,0),c(0,0,0,4.13,17.70,0,0,0) ,c(0,-1.72,0,6.87,6.87,1.72,0,0)))
+scenarios=c("unbalanced_randomize_2_0","unbalanced_randomize_2_1","unbalanced_randomize_2_2","unbalanced_randomize_2_3","unbalanced_randomize_2_4","unbalanced_randomize_2_5","unbalanced_randomize_2_6")
+pi2=c(0.7,0.7)
+```
+
+```{r,include=FALSE,message=FALSE,warning=FALSE}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = "tidyverse") %dopar% get_scenario(beta = beta[i,],simu_time ##= simu_time_all,scenario = scenarios[i],pi2=pi2)
+##stopCluster(cl)
+```
+
+```{r,dpi=300,message=FALSE,warning=FALSE,echo=FALSE,fig.show="hold",out.width='60%'}
+outcome=list(NULL)
+for (i in 1:7) {
+  data_name=paste(scenarios[i],"csv",sep = ".")
+  outcome[[i]]=read_csv(data_name)
+}
+
+for (i in 1:7) {
+  data=outcome[[i]]
+  get_scenario_plot(data,beta=beta[i,],scenario = scenarios[i],pi2 = pi2)
+}
+```
+
+```{r}
+##cl <- makeCluster(core_num)
+##registerDoParallel(cl)
+##foreach(i=1:7,.packages = c("tidyverse","SMARTAR") )%dopar% get_smartar(beta = ##beta[i,],simu_time = simu_time_all,pi2 = pi2)
+##stopCluster(cl)
+```
